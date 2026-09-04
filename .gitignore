@@ -34,7 +34,7 @@ htmlcov/
 
 # Data and dataset storage
 data/*
-!data/README.md
+!data/*.md
 *.parquet
 *.csv
 *.jsonl

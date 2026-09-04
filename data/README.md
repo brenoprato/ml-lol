@@ -1,25 +1,27 @@
-# 📊 League of Legends Dataset Dictionary & Metadata (IC)
+# League of Legends Dataset Dictionary & Codebook
 
-This document serves as the official **Data Dictionary (Codebook)** for the dataset collected via the Riot Games API for Academic Scientific Research (*Iniciação Científica - IC*).
+Official Data Dictionary and Codebook for the dataset collected via the Riot Games API for Academic Scientific Research (*Iniciacao Cientifica - IC*) and Machine Learning applications.
+
+[Versao em Portugues (README.pt-BR.md)](README.pt-BR.md)
 
 ---
 
-## 📌 Dataset Metadata
+## 1. Dataset Metadata
 
-- **Data Source:** Official Riot Games API (`LEAGUE-V4` & `MATCH-V5`).
+- **Data Source:** Official Riot Games API (`LEAGUE-V4` and `MATCH-V5`).
 - **Target Tiers:** Apex Ranked Solo/Duo (Challenger, Grandmaster, Master).
 - **Target Queue:** Queue ID `420` (`RANKED_SOLO_5x5`).
 - **Granularity:** **10 rows per match** (each row represents 1 unique participant in that match).
 - **File Formats:**
-  - `data/ranked_matches.parquet`: Column-oriented, Snappy-compressed format preserving strict data types (recommended for Python/Pandas/Polars/Scikit-learn).
-  - `data/ranked_matches.csv`: Delimited UTF-8 tabular CSV format (recommended for Excel, Google Sheets, or spreadsheet inspection).
-- **State Checkpoint:** `data/state_br1.json` (Tracks visited PUUIDs and processed Match IDs to ensure zero duplicate matches).
+  - `data/ranked_matches.parquet`: Column-oriented, Snappy-compressed format preserving strict data types (recommended for Python, Pandas, Polars, Scikit-learn).
+  - `data/ranked_matches.csv`: Standard delimited UTF-8 tabular CSV format (recommended for Excel, Google Sheets, or spreadsheet inspection).
+- **State Checkpoint:** `data/state_<platform>.json` (Tracks visited PUUIDs and processed Match IDs to ensure zero duplicate matches across runs).
 
 ---
 
-## 📖 Complete Feature Dictionary (108 Columns)
+## 2. Complete Feature Dictionary (108 Columns)
 
-### 1. Match Identification, Context & Side (10 columns)
+### 2.1 Match Identification, Context & Side (10 columns)
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `match_id` | `string` | Unique Riot Match identifier (e.g. `BR1_3275903146`). |
@@ -33,9 +35,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 | `team_id` | `int64` | Team identifier: `100` for Blue Side, `200` for Red Side. |
 | `side` | `string` | Explicit map side: **`BLUE`** or **`RED`**. |
 
----
-
-### 2. Player Role, Champion & Target Variable (6 columns)
+### 2.2 Player Role, Champion & Target Variable (6 columns)
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `team_position` | `string` | Primary assigned role: `TOP`, `JUNGLE`, `MIDDLE`, `BOTTOM` (ADC), or `UTILITY` (Support). |
@@ -45,9 +45,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 | `champ_level` | `int64` | Final level reached by the champion (1 - 18). |
 | `win` | `int64` | **Target Variable:** `1` for Victory, `0` for Defeat. |
 
----
-
-### 3. Combat, KDA & Multikills (16 columns)
+### 2.3 Combat, KDA & Multikills (16 columns)
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `kills` | `int64` | Number of enemy champions killed. |
@@ -67,9 +65,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 | `longest_time_spent_living` | `int64` | Longest single continuous lifespan during the match (in seconds). |
 | `total_time_spent_dead` | `int64` | Cumulative time spent waiting to respawn (in seconds). |
 
----
-
-### 4. Damage Breakdown, Healing, Shielding & CC (16 columns)
+### 2.4 Damage Breakdown, Healing, Shielding & CC (16 columns)
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `total_damage_dealt_to_champions` | `int64` | Total damage dealt to enemy champions. |
@@ -89,9 +85,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 | `time_ccing_others` | `int64` | Total duration (in seconds) of Crowd Control applied to enemies. |
 | `total_time_cc_dealt` | `int64` | Total CC and debuff time applied in game. |
 
----
-
-### 5. Structures, Turrets & Neutral Objectives (14 columns)
+### 2.5 Structures, Turrets & Neutral Objectives (14 columns)
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `damage_dealt_to_buildings` | `int64` | Total damage dealt to structures (turrets + inhibitors). |
@@ -109,9 +103,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 | `baron_kills` | `int64` | Number of Barons killed by the player. |
 | `objectives_stolen` | `int64` | Number of epic monsters stolen from the enemy team (*steals*). |
 
----
-
-### 6. Economy, CS & Early Game Laning Pace (13 columns)
+### 2.6 Economy, CS & Early Game Laning Pace (13 columns)
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `gold_earned` | `int64` | Total gold accumulated throughout the match. |
@@ -128,9 +120,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 | `jungle_cs_before_10_minutes` | `int64` | Jungle monsters killed in the first 10 minutes of play. |
 | `early_laning_phase_gold_exp_advantage`| `int64` | Riot score indicating gold/experience lead achieved during early laning. |
 
----
-
-### 7. Vision & Map Influence (6 columns)
+### 2.7 Vision & Map Influence (6 columns)
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `vision_score` | `int64` | Official Riot in-game Vision Score. |
@@ -140,9 +130,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 | `control_wards_placed` | `int64` | Control wards (*Pink Wards*) placed. |
 | `vision_wards_bought_in_game` | `int64` | Control wards purchased with gold from the shop. |
 
----
-
-### 8. Mechanics, Skillshots & Pings (16 columns)
+### 2.8 Mechanics, Skillshots & Pings (16 columns)
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `skillshots_dodged` | `int64` | **Number of enemy skillshot projectiles dodged.** |
@@ -162,9 +150,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 | `push_pings` | `int64` | "Push Lane" pings issued. |
 | `retreat_pings` | `int64` | "Retreat / Yellow Danger" pings issued. |
 
----
-
-### 9. Build, Summoner Spells & Rune IDs (11 columns)
+### 2.9 Build, Summoner Spells & Rune IDs (11 columns)
 | Column Name | Data Type | Description |
 | :--- | :--- | :--- |
 | `item0` | `int64` | **Item ID** in inventory slot 1 (`0` if empty). |
@@ -181,13 +167,13 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 
 ---
 
-## 🔍 Reference Code Tables
+## 3. Reference Tables
 
-### Summoner Spell IDs
+### 3.1 Summoner Spell IDs
 | ID | English Name | Portuguese Name |
 | :--- | :--- | :--- |
 | `1` | Cleanse | Purificar |
-| `3` | Exhaust | Exaustão |
+| `3` | Exhaust | Exaustao |
 | `4` | Flash | Flash |
 | `6` | Ghost | Fantasma |
 | `7` | Heal | Curar |
@@ -196,7 +182,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 | `14` | Ignite | Incendiar |
 | `21` | Barrier | Barreira |
 
-### Rune Tree IDs
+### 3.2 Rune Tree IDs
 | ID | Tree Name | Theme |
 | :--- | :--- | :--- |
 | `8000` | Precision | Attack speed, sustained combat damage, and executes. |
@@ -207,7 +193,7 @@ This document serves as the official **Data Dictionary (Codebook)** for the data
 
 ---
 
-## 🐍 Python Loading Example (Pandas & Polars)
+## 4. Python Loading Example (Pandas & Polars)
 
 ```python
 import pandas as pd
@@ -218,7 +204,7 @@ df = pd.read_parquet("data/ranked_matches.parquet")
 print(f"Total participant rows: {len(df):,}")
 print(f"Total unique matches:   {df['match_id'].nunique():,}")
 
-# Filter specific role / champion
+# Example: Filter TOP laners and examine building damage vs gold
 top_laners = df[df["team_position"] == "TOP"]
 print(top_laners[["champion_name", "win", "damage_dealt_to_buildings", "gold_per_minute"]].head())
 ```
