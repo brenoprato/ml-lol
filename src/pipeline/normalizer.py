@@ -1,6 +1,6 @@
 """Normalizer to transform raw Riot Match-v5 JSON payloads into ML-ready tabular records."""
 
-from typing import Any
+from typing import Any, Optional
 from loguru import logger
 
 from src.core.exceptions import SchemaValidationException
@@ -15,15 +15,27 @@ class MatchNormalizer:
     def normalize_match(
         raw_match: dict[str, Any],
         min_game_duration_sec: int = 300,
+        max_game_duration_sec: Optional[int] = None,
+        exclude_surrenders: bool = False,
+        patch_prefix: Optional[str] = None,
+        champions: Optional[list[str]] = None,
+        positions: Optional[list[str]] = None,
+        side: Optional[str] = None,
     ) -> list[MLParticipantRecord]:
         """Convert a raw Riot Match-v5 response dict into a list of MLParticipantRecord rows.
 
         Args:
             raw_match: Raw JSON dict returned from Riot Match-v5 endpoint.
             min_game_duration_sec: Threshold below which matches are treated as remakes (default: 300s / 5m).
+            max_game_duration_sec: Optional upper bound on match duration in seconds.
+            exclude_surrenders: When True, skips matches that ended in surrender.
+            patch_prefix: Optional game version prefix filter (e.g. "14.4").
+            champions: Optional list of champion names; skips matches featuring none of them.
+            positions: Optional list of roles (TOP, JUNGLE, MIDDLE, BOTTOM, UTILITY) to retain.
+            side: Optional map side ("BLUE" or "RED") to retain.
 
         Returns:
-            List of 10 MLParticipantRecord objects (or fewer if non-standard).
+            List of filtered MLParticipantRecord objects.
         """
         try:
             match_dto = MatchDTO.model_validate(raw_match)
@@ -33,12 +45,38 @@ class MatchNormalizer:
         info = match_dto.info
         metadata = match_dto.metadata
 
-        # Exclude remakes or truncated matches
+        # Match-level filters
         if info.game_duration < min_game_duration_sec:
             logger.debug(
                 f"Skipping match {metadata.match_id}: duration too short ({info.game_duration}s < {min_game_duration_sec}s)"
             )
             return []
+
+        if max_game_duration_sec is not None and info.game_duration > max_game_duration_sec:
+            logger.debug(
+                f"Skipping match {metadata.match_id}: duration exceeds max ({info.game_duration}s > {max_game_duration_sec}s)"
+            )
+            return []
+
+        if exclude_surrenders and (info.game_ended_in_surrender or info.game_ended_in_early_surrender):
+            logger.debug(f"Skipping match {metadata.match_id}: ended in surrender.")
+            return []
+
+        if patch_prefix and not info.game_version.startswith(patch_prefix):
+            logger.debug(
+                f"Skipping match {metadata.match_id}: patch {info.game_version} does not match '{patch_prefix}'."
+            )
+            return []
+
+        if champions:
+            target_champions = {c.strip().lower() for c in champions if c.strip()}
+            if target_champions and not any(
+                p.champion_name.lower() in target_champions for p in info.participants
+            ):
+                logger.debug(
+                    f"Skipping match {metadata.match_id}: none of target champions {sorted(target_champions)} present."
+                )
+                return []
 
         duration_minutes = max(1.0, info.game_duration / 60.0)
         records: list[MLParticipantRecord] = []
@@ -78,7 +116,7 @@ class MatchNormalizer:
                     secondary_rune_tree = p.perks.styles[1].style
 
             position = p.team_position or p.individual_position or "UNKNOWN"
-            side = "BLUE" if p.team_id == 100 else "RED"
+            participant_side = "BLUE" if p.team_id == 100 else "RED"
 
             record = MLParticipantRecord(
                 match_id=metadata.match_id,
@@ -90,7 +128,7 @@ class MatchNormalizer:
                 puuid=p.puuid,
                 summoner_name=p.summoner_name or p.riot_id_game_name,
                 team_id=p.team_id,
-                side=side,
+                side=participant_side,
                 team_position=position.upper(),
                 individual_position=p.individual_position or "",
                 champion_id=p.champion_id,
@@ -191,5 +229,15 @@ class MatchNormalizer:
                 secondary_rune_tree=secondary_rune_tree,
             )
             records.append(record)
+
+        if positions:
+            target_positions = {pos.strip().upper() for pos in positions if pos.strip()}
+            if target_positions:
+                records = [r for r in records if r.team_position.upper() in target_positions]
+
+        if side:
+            target_side = side.strip().upper()
+            if target_side:
+                records = [r for r in records if r.side == target_side]
 
         return records

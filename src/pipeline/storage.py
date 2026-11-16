@@ -18,14 +18,16 @@ class BatchStorage:
         data_dir: Path,
         output_format: Literal["parquet", "csv", "both"] = "parquet",
         batch_size_matches: int = 50,
+        dataset_name: str = "ranked_matches",
     ) -> None:
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.output_format = output_format
         self.batch_size_rows = batch_size_matches * 10
+        self.dataset_name = dataset_name
 
-        self.parquet_path = self.data_dir / "ranked_matches.parquet"
-        self.csv_path = self.data_dir / "ranked_matches.csv"
+        self.parquet_path = self.data_dir / f"{dataset_name}.parquet"
+        self.csv_path = self.data_dir / f"{dataset_name}.csv"
 
         self._buffer: list[MLParticipantRecord] = []
         self._total_rows_written: int = 0
@@ -107,6 +109,82 @@ class BatchStorage:
             raise FileNotFoundError(f"No Parquet dataset found at {self.parquet_path}")
 
         df = pd.read_parquet(self.parquet_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(target_path, index=False)
         logger.info(f"Successfully exported {len(df)} rows from Parquet to {target_path}")
         return target_path
+
+    def filter_and_export(
+        self,
+        output_path: Optional[Path] = None,
+        output_format: Literal["parquet", "csv", "both"] = "csv",
+        input_path: Optional[Path] = None,
+        champions: Optional[list[str]] = None,
+        positions: Optional[list[str]] = None,
+        side: Optional[str] = None,
+        win: Optional[int] = None,
+        patch_prefix: Optional[str] = None,
+        min_duration_sec: Optional[int] = None,
+        max_duration_sec: Optional[int] = None,
+    ) -> tuple[int, list[Path]]:
+        """Filter an existing dataset on disk and export matching rows."""
+        source_path = input_path or self.parquet_path
+        if not source_path.exists():
+            raise FileNotFoundError(f"No dataset found at {source_path}")
+
+        if source_path.suffix.lower() == ".csv":
+            df = pd.read_csv(source_path)
+        else:
+            df = pd.read_parquet(source_path)
+
+        if champions:
+            target_champions = {c.strip().lower() for c in champions if c.strip()}
+            if target_champions:
+                df = df[df["champion_name"].astype(str).str.lower().isin(target_champions)]
+
+        if positions:
+            target_positions = {pos.strip().upper() for pos in positions if pos.strip()}
+            if target_positions:
+                df = df[df["team_position"].astype(str).str.upper().isin(target_positions)]
+
+        if side:
+            df = df[df["side"].astype(str).str.upper() == side.strip().upper()]
+
+        if win is not None:
+            df = df[df["win"] == win]
+
+        if patch_prefix:
+            df = df[df["game_version"].astype(str).str.startswith(patch_prefix.strip())]
+
+        if min_duration_sec is not None:
+            df = df[df["game_duration"] >= min_duration_sec]
+
+        if max_duration_sec is not None:
+            df = df[df["game_duration"] <= max_duration_sec]
+
+        default_ext = ".parquet" if output_format == "parquet" else ".csv"
+        base_output = output_path or (self.data_dir / f"filtered_matches{default_ext}")
+        base_output.parent.mkdir(parents=True, exist_ok=True)
+
+        written_paths: list[Path] = []
+        if output_format in ("parquet", "both"):
+            parquet_target = (
+                base_output if base_output.suffix.lower() == ".parquet" else base_output.with_suffix(".parquet")
+            )
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            tmp_parquet = parquet_target.with_suffix(".tmp")
+            pq.write_table(table, tmp_parquet, compression="snappy")
+            tmp_parquet.replace(parquet_target)
+            written_paths.append(parquet_target)
+
+        if output_format in ("csv", "both"):
+            csv_target = (
+                base_output if base_output.suffix.lower() == ".csv" else base_output.with_suffix(".csv")
+            )
+            df.to_csv(csv_target, index=False)
+            written_paths.append(csv_target)
+
+        logger.info(
+            f"Filtered dataset exported: {len(df)} rows written to {[str(p) for p in written_paths]}"
+        )
+        return len(df), written_paths

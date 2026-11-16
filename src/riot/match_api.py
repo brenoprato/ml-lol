@@ -22,6 +22,8 @@ class MatchAPIClient:
         count: int = 20,
         start: int = 0,
         match_type: Optional[str] = "ranked",
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
     ) -> list[str]:
         """Fetch list of match IDs for a given player PUUID.
 
@@ -31,6 +33,8 @@ class MatchAPIClient:
             count: Number of match IDs to return (1-100).
             start: Start index for pagination.
             match_type: Type of match ("ranked", "normal", "tourney", "tutorial").
+            start_time: Optional epoch timestamp in seconds (Match-v5 startTime).
+            end_time: Optional epoch timestamp in seconds (Match-v5 endTime).
 
         Returns:
             List of match ID strings (e.g. ['BR1_2893821019']).
@@ -44,6 +48,10 @@ class MatchAPIClient:
             params["queue"] = queue
         if match_type is not None:
             params["type"] = match_type
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
 
         response = self.http_client.get(url, params=params)
         match_ids = response.json()

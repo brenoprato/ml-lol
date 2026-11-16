@@ -123,3 +123,24 @@ This checklist outlines the atomic execution steps required to build, test, and 
     - CLI usage examples.
     - Detailed dataset column dictionary and ML use-case suggestions.
   - **Verification:** Review documentation for completeness and clarity.
+
+---
+
+## Phase 8: Interactive CLI & Advanced Pre-Request Filtering
+
+- [x] **Task 8.1: Filter Schema & Validation Models (`src/models/filter_models.py`)**
+  - Implement `CollectionFilterConfig` and `DatasetFilterConfig` supporting multi-region platforms, all ranked tiers (`CHALLENGER`..`IRON`), divisions (`I`..`IV`), queue/match types, time windows, duration bounds, surrender exclusion, patch prefix, champion/position/side filters, and discovery modes.
+  - Add reproducible CLI command generation (`to_cli_command()`).
+  - **Verification:** Unit tests in `tests/test_cli_and_filters.py` verifying validation, invalid input rejection, and CLI flag round-trip reconstruction.
+
+- [x] **Task 8.2: Standard Tier Seed Harvesting & Match Time Filtering**
+  - Extend `LeagueAPIClient` with `get_league_entries` and multi-tier/division `harvest_seed_puuids` support.
+  - Extend `MatchAPIClient.get_match_ids_by_puuid` with `start_time` and `end_time` filtering.
+  - Extend `MatchNormalizer.normalize_match` with max duration, surrender exclusion, patch prefix, champion, position, and side filters.
+  - **Verification:** Mocked `respx` and unit tests verifying standard tier pagination, query params, and match filtering.
+
+- [x] **Task 8.3: Interactive CLI Wizard & Offline Dataset Filter Subcommand**
+  - Implement `src/cli/interactive.py` with main menu loop, step-by-step pre-request filter wizard, pre-flight summary confirmation, status inspector, and offline dataset filter wizard.
+  - Update `src/main.py` (`interactive`, `collect`, `filter`, `export`, `status`) and `BatchStorage.filter_and_export`.
+  - Support multi-platform execution via `run_multi_platform_collection` in `src/pipeline/orchestrator.py`.
+  - **Verification:** `pytest -v` (27 passed), CLI `--help` checks, and interactive smoke test.

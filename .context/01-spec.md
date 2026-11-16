@@ -10,10 +10,12 @@ The pipeline extracts **108 granular in-game metrics per participant** across ap
 ## 2. Functional Requirements & Scope
 
 ### 2.1 Filtering & Scope
-- **Queue Filtering:** Extract ranked matches (Queue ID `420` for `RANKED_SOLO_5x5` and `440` for `RANKED_FLEX_SR`).
-- **Apex Tier Harvesting:** Automatically harvest seed player PUUIDs from **Challenger, Grandmaster, and Master** leagues via `LEAGUE-V4`.
-- **Multi-Region Support:** Automatic mapping from platform routing (e.g. `BR1`, `NA1`, `KR`, `EUW1`) to regional clusters (`americas`, `europe`, `asia`, `sea`).
-- **Player Diversity:** Breadth-first crawl sampling recent games per player and discovering the other 9 participants dynamically.
+- **Queue & Match Type Filtering:** Extract matches by Queue ID (`420` Ranked Solo/Duo, `440` Ranked Flex, `400` Normal Draft, `450` ARAM, or `0`/All) and match type (`ranked`, `normal`, `tourney`, `tutorial`).
+- **Full Tier & Division Harvesting:** Harvest seed player PUUIDs across **all ranked tiers** (`CHALLENGER`, `GRANDMASTER`, `MASTER`, `DIAMOND`, `EMERALD`, `PLATINUM`, `GOLD`, `SILVER`, `BRONZE`, `IRON`) and configurable divisions (`I`, `II`, `III`, `IV`) via `LEAGUE-V4`.
+- **Multi-Region Support:** Support single or multi-platform selection (e.g. `BR1`, `NA1`, `KR`, `EUW1`, `BR1,KR,NA1`) with automatic mapping to regional clusters (`americas`, `europe`, `asia`, `sea`).
+- **Pre-Request & Gameplay Filters:** Support time windows (`startTime`/`endTime` or `--days-back`), patch prefix filtering (`--patch`), min/max match duration bounds, surrender exclusion (`--exclude-surrenders`), champion filtering (`--champions`), role/position filtering (`--positions`), and map side filtering (`--side`).
+- **Player Diversity Modes:** Toggle between Snowball Graph discovery (enqueuing the 9 other participants per match) and strict seed-tier-only harvesting (`--no-discover`).
+- **Interactive CLI Wizard & Offline Filtering:** Provide an interactive menu and step-by-step filter configuration wizard before dispatching any Riot API requests, plus an offline `filter` command to slice and export existing Parquet/CSV datasets.
 - **Deduplication & Resume:** Atomic checkpointing of visited PUUIDs and processed Match IDs to allow pausing and resuming without duplicate requests or data loss.
 
 ### 2.2 Complete Tabular Dataset Schema (108 Features)

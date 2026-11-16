@@ -73,20 +73,25 @@ ml-lol/
 │   │   ├── routing.py           # Platform (BR1, KR, NA1) to Region routing mapper
 │   │   ├── league_api.py        # League-v4 client (Challenger, GM, Master harvesting)
 │   │   └── match_api.py         # Match-v5 client (Match history & Match detail fetcher)
+│   ├── cli/
+│   │   ├── __init__.py
+│   │   └── interactive.py       # Interactive terminal menus, filter wizard & pre-flight summary
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── api_models.py        # Raw Riot API DTO models (MatchDTO, ParticipantDTO)
-│   │   └── dataset_models.py    # Tabular 108-feature schema (MLParticipantRecord)
+│   │   ├── dataset_models.py    # Tabular 108-feature schema (MLParticipantRecord)
+│   │   └── filter_models.py     # CollectionFilterConfig, DatasetFilterConfig & tier/queue constants
 │   ├── pipeline/
 │   │   ├── __init__.py
-│   │   ├── normalizer.py        # Raw JSON to 108 ML features transformer
+│   │   ├── normalizer.py        # Raw JSON to 108 ML features transformer & match/role filter
 │   │   ├── state_manager.py     # Checkpoint tracker & match deduplicator
-│   │   ├── storage.py           # Atomic Parquet & CSV batch writer
-│   │   └── orchestrator.py      # Crawler coordinator with graceful shutdown
-│   └── main.py                  # CLI Orchestrator (collect, export, status)
+│   │   ├── storage.py           # Atomic Parquet & CSV batch writer and offline filter exporter
+│   │   └── orchestrator.py      # Single/multi-platform crawler coordinator with graceful shutdown
+│   └── main.py                  # CLI entry point (interactive, collect, filter, export, status)
 └── tests/
     ├── __init__.py
     ├── conftest.py              # Mock fixtures and sample match payloads
+    ├── test_cli_and_filters.py  # Filter models, wizard, standard tiers & offline export tests
     ├── test_config.py           # Configuration tests
     ├── test_rate_limiter.py     # Rate limiter throttling & 429 tests
     ├── test_http_client.py      # HTTP client retry & mock tests
@@ -120,27 +125,27 @@ ml-lol/
    - Maps platform identifiers (e.g. `BR1`, `NA1`, `EUW1`, `KR`, `JP1`) to their regional clusters (`americas`, `europe`, `asia`, `sea`).
 
 5. **`src/riot/league_api.py`**:
-   - Harvests player PUUIDs from apex ranked leagues (Challenger, Grandmaster, Master) for Ranked Solo/Duo (`RANKED_SOLO_5x5`).
+   - Harvests player PUUIDs from both Apex leagues (`CHALLENGER`, `GRANDMASTER`, `MASTER`) and Standard tier/division entries (`DIAMOND` through `IRON`, divisions `I`-`IV`, paginated) for configured queues.
 
 6. **`src/riot/match_api.py`**:
-   - Queries Match-v5 endpoints to retrieve match IDs for a player PUUID and download full match detail payloads.
+   - Queries Match-v5 endpoints to retrieve match IDs (with optional `queue`, `type`, `startTime`, and `endTime` filters) and download full match detail payloads.
 
-7. **`src/pipeline/normalizer.py` & `src/models/dataset_models.py`**:
-   - Parses the raw Match JSON and extracts all 108 granular features per participant (combat, damage, objectives, economy, vision, skillshots, spells, pings, runes, items, side, win/loss).
+7. **`src/models/filter_models.py`**:
+   - Defines `CollectionFilterConfig` and `DatasetFilterConfig` Pydantic models, validating regions, tiers, divisions, durations, time ranges, champions, positions, and sides, and reconstructing reproducible CLI commands (`to_cli_command()`).
 
-8. **`src/pipeline/state_manager.py`**:
+8. **`src/pipeline/normalizer.py` & `src/models/dataset_models.py`**:
+   - Parses raw Match JSON payloads, applies match-level and participant-level filters (duration bounds, surrenders, patch prefix, champions, positions, side), and extracts all 108 granular features per participant.
+
+9. **`src/pipeline/state_manager.py`**:
    - Persists crawler state to `data/state_{platform}.json`.
    - Ensures no match is ever queried or saved twice.
    - Allows safe resume after interruption (`Ctrl+C`).
 
-9. **`src/pipeline/storage.py`**:
-   - Buffers participant rows in RAM batches.
-   - Flushes atomically to `data/ranked_matches.parquet` using Snappy compression and appends to `data/ranked_matches.csv`.
+10. **`src/pipeline/storage.py`**:
+    - Buffers participant rows in RAM batches, flushes atomically to `data/<dataset_name>.parquet` (Snappy) and `data/<dataset_name>.csv`, and provides `filter_and_export()` for offline dataset slicing.
 
-10. **`src/pipeline/orchestrator.py`**:
-    - Coordinates breadth-first player traversal for high diversity.
-    - Handles duration and match limits.
-    - Captures `SIGINT` (Ctrl+C) / `SIGTERM` to safely flush buffered data before exiting.
+11. **`src/pipeline/orchestrator.py`**:
+    - Coordinates single- and multi-platform traversal (`run_multi_platform_collection`), participant discovery mode toggles, duration/match budgets, and graceful `SIGINT`/`SIGTERM` shutdown.
 
-11. **`src/main.py`**:
-    - CLI entry point supporting `collect`, `export`, and `status` subcommands.
+12. **`src/cli/interactive.py` & `src/main.py`**:
+    - Interactive terminal menu and step-by-step filter wizard (`prompt_collection_filters`) displaying a pre-flight summary and confirmation before any API call, plus non-interactive flag-driven subcommands (`interactive`, `collect`, `filter`, `export`, `status`).
