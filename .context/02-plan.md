@@ -75,7 +75,7 @@ ml-lol/
 │   │   └── match_api.py         # Match-v5 client (Match history & Match detail fetcher)
 │   ├── cli/
 │   │   ├── __init__.py
-│   │   └── interactive.py       # Interactive terminal menus, filter wizard & pre-flight summary
+│   │   └── interactive.py       # Rich + Questionary checkbox menus, filter wizard & pre-flight dashboard
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── api_models.py        # Raw Riot API DTO models (MatchDTO, ParticipantDTO)
@@ -148,4 +148,4 @@ ml-lol/
     - Coordinates single- and multi-platform traversal (`run_multi_platform_collection`), participant discovery mode toggles, duration/match budgets, and graceful `SIGINT`/`SIGTERM` shutdown.
 
 12. **`src/cli/interactive.py` & `src/main.py`**:
-    - Interactive terminal menu and step-by-step filter wizard (`prompt_collection_filters`) displaying a pre-flight summary and confirmation before any API call, plus non-interactive flag-driven subcommands (`interactive`, `collect`, `filter`, `export`, `status`).
+    - Rich + Questionary interactive menu and checkbox-driven filter wizard (`prompt_collection_filters`, `prompt_dataset_filter`) displaying styled tables/panels for pre-flight summary and confirmation before any API call, plus non-interactive flag-driven subcommands (`interactive`, `collect`, `filter`, `export`, `status`).

@@ -4,9 +4,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 from pydantic import ValidationError
+import questionary
 import respx
 
-from src.cli.interactive import prompt_collection_filters
+from src.cli.interactive import prompt_collection_filters, prompt_dataset_filter
 from src.config.settings import Settings
 from src.core.http_client import ResilientHTTPClient
 from src.main import build_filter_config_from_args, build_parser
@@ -164,34 +165,71 @@ def test_normalizer_filters(sample_match_payload: dict) -> None:
     assert filtered_top_blue[0].side == "BLUE"
 
 
+class _DummyQuestion:
+    def __init__(self, answer):
+        self._answer = answer
+
+    def ask(self):
+        return self._answer
+
+
+def _patch_questionary(
+    monkeypatch: pytest.MonkeyPatch,
+    checkbox_answers: list,
+    select_answers: list,
+    text_answers: list,
+    confirm_answers: list,
+) -> None:
+    cb_iter = iter(checkbox_answers)
+    sel_iter = iter(select_answers)
+    txt_iter = iter(text_answers)
+    cnf_iter = iter(confirm_answers)
+
+    monkeypatch.setattr(questionary, "checkbox", lambda *a, **kw: _DummyQuestion(next(cb_iter)))
+    monkeypatch.setattr(questionary, "select", lambda *a, **kw: _DummyQuestion(next(sel_iter)))
+    monkeypatch.setattr(questionary, "text", lambda *a, **kw: _DummyQuestion(next(txt_iter)))
+    monkeypatch.setattr(questionary, "confirm", lambda *a, **kw: _DummyQuestion(next(cnf_iter)))
+
+
 def test_interactive_wizard_builds_filters_before_api_calls(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Simulated user responses step by step
-    answers = iter([
-        "5",              # Step 1: Custom / Multi-region
-        "BR1,KR",         # Platforms
-        "5",              # Step 2: Custom tiers
-        "CHALLENGER,DIAMOND",  # Tiers
-        "I,II",           # Divisions
-        "2",              # Max pages per division
-        "1",              # Step 3: Ranked Solo/Duo (420)
-        "7",              # Step 4: Last 7 days
-        "14.4",           # Patch prefix
-        "600",            # Min duration
-        "2400",           # Max duration
-        "y",              # Exclude surrenders
-        "Ahri,LeeSin",    # Champions
-        "TOP,MIDDLE",     # Positions
-        "BLUE",           # Map side
-        "2",              # Strict seed tiers only (no snowball discovery)
-        "4",              # Step 5: 4 hours
-        "50",             # Target matches
-        "5",              # Max matches per player
-        "parquet",        # Output format
-        "ic_filtered",    # Dataset filename
-        "n",              # Do not reset state
-        "y",              # Pre-flight confirmation: Start collection now?
-    ])
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    _patch_questionary(
+        monkeypatch,
+        checkbox_answers=[
+            ["BR1", "KR"],                   # 1. Platforms
+            ["CHALLENGER", "DIAMOND"],       # 2. Tiers
+            ["I", "II"],                     # 2b. Divisions
+            ["TOP", "MIDDLE"],               # 4. Positions
+            ["BLUE"],                        # 5. Side
+            [                                # 6. Extra filters
+                "exclude_surrenders",
+                "strict_seeds",
+                "time_window",
+                "patch_filter",
+                "champion_filter",
+                "duration_bounds",
+            ],
+            ["parquet"],                     # 7. Output formats
+        ],
+        select_answers=[
+            "420",                           # 3. Queue (Ranked Solo/Duo)
+        ],
+        text_answers=[
+            "2",                             # Max pages per division
+            "7",                             # Last 7 days
+            "14.4",                          # Patch prefix
+            "Ahri,LeeSin",                   # Champions
+            "600",                           # Min duration
+            "2400",                          # Max duration
+            "4.0",                           # Max duration hours
+            "50",                            # Target matches
+            "5",                             # Max per player
+            "ic_filtered",                   # Dataset filename
+        ],
+        confirm_answers=[
+            False,                           # Reset state?
+            True,                            # Start collection now?
+        ],
+    )
 
     config = prompt_collection_filters()
     assert config is not None
@@ -217,29 +255,68 @@ def test_interactive_wizard_builds_filters_before_api_calls(monkeypatch: pytest.
 
 
 def test_interactive_wizard_cancel_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    answers = iter([
-        "1",   # BR1
-        "1",   # Apex tiers
-        "1",   # Solo/Duo
-        "",    # Days back
-        "",    # Patch
-        "",    # Min duration
-        "",    # Max duration
-        "n",   # Exclude surrenders
-        "",    # Champions
-        "",    # Positions
-        "",    # Side
-        "1",   # Snowball
-        "",    # Hours
-        "",    # Target matches
-        "",    # Max per player
-        "",    # Format
-        "",    # Dataset name
-        "n",   # Reset state
-        "n",   # Cancel at confirmation!
-    ])
-    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    _patch_questionary(
+        monkeypatch,
+        checkbox_answers=[
+            ["BR1"],
+            ["CHALLENGER", "GRANDMASTER", "MASTER"],
+            ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"],
+            ["BLUE", "RED"],
+            [],
+            ["parquet", "csv"],
+        ],
+        select_answers=["420"],
+        text_answers=["8.0", "Unlimited", "10", "ranked_matches"],
+        confirm_answers=[False, False],  # Cancel at confirmation!
+    )
     assert prompt_collection_filters() is None
+
+    # Cancel immediately at platform checkbox (Ctrl+C returns None)
+    _patch_questionary(
+        monkeypatch,
+        checkbox_answers=[None],
+        select_answers=[],
+        text_answers=[],
+        confirm_answers=[],
+    )
+    assert prompt_collection_filters() is None
+
+
+def test_interactive_dataset_filter_wizard(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source_file = tmp_path / "ranked_matches.parquet"
+    source_file.touch()
+
+    _patch_questionary(
+        monkeypatch,
+        checkbox_answers=[
+            ["MIDDLE"],       # Positions
+            ["BLUE"],         # Side
+            [1],              # Win only
+            ["csv", "parquet"],
+        ],
+        select_answers=[],
+        text_answers=[
+            str(source_file),
+            "Ahri,Orianna",
+            "14.4",
+            "900",
+            "",
+            str(tmp_path / "out.csv"),
+        ],
+        confirm_answers=[],
+    )
+
+    settings = Settings(RIOT_API_KEY="RGAPI-mock-key-12345", DATA_DIR=tmp_path)
+    cfg = prompt_dataset_filter(settings)
+    assert cfg is not None
+    assert cfg.positions == ["MIDDLE"]
+    assert cfg.side == "BLUE"
+    assert cfg.win == 1
+    assert cfg.champions == ["Ahri", "Orianna"]
+    assert cfg.patch_prefix == "14.4"
+    assert cfg.min_duration_sec == 900
+    assert cfg.max_duration_sec is None
+    assert cfg.output_format == "both"
 
 
 def test_batch_storage_filter_and_export(tmp_path: Path) -> None:

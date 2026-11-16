@@ -16,7 +16,9 @@ dependencies = [
     "pyarrow>=15.0.0",
     "loguru>=0.7.2",
     "tqdm>=4.66.0",
-    "python-dotenv>=1.0.0"
+    "python-dotenv>=1.0.0",
+    "questionary>=2.0.1",
+    "rich>=13.7.0"
 ]
 
 [project.optional-dependencies]

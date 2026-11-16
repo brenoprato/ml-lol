@@ -1,19 +1,27 @@
-"""Interactive CLI wizard and terminal UI helpers for configuring filters before API calls."""
+"""Rich and checkbox-driven interactive CLI wizard for configuring filters before API calls."""
 
 from pathlib import Path
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import ValidationError
 import pyarrow.parquet as pq
+import questionary
+from questionary import Choice, Style
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from src.config.settings import Settings, get_settings
 from src.models.filter_models import (
     ALL_DIVISIONS,
     ALL_TIERS,
+    APEX_TIERS,
     CollectionFilterConfig,
     DatasetFilterConfig,
     QUEUE_MAP,
+    STANDARD_TIERS,
     VALID_POSITIONS,
 )
 from src.pipeline.orchestrator import run_multi_platform_collection
@@ -21,407 +29,541 @@ from src.pipeline.state_manager import StateManager
 from src.pipeline.storage import BatchStorage
 from src.riot.routing import PLATFORM_TO_REGION_MAP
 
+console = Console()
 
-def _prompt_text(prompt: str, default: Optional[str] = None) -> str:
-    """Prompt for a string value with optional default shown in brackets."""
-    suffix = f" [{default}]" if default is not None else ""
-    raw = input(f"{prompt}{suffix}: ").strip()
-    if not raw and default is not None:
-        return default
-    return raw
+CLI_STYLE = Style(
+    [
+        ("qmark", "fg:#00d7ff bold"),
+        ("question", "bold"),
+        ("answer", "fg:#00ff87 bold"),
+        ("pointer", "fg:#00d7ff bold"),
+        ("highlighted", "fg:#00d7ff bold"),
+        ("selected", "fg:#00ff87"),
+        ("separator", "fg:#6c6c6c"),
+        ("instruction", "fg:#8a8a8a"),
+        ("text", ""),
+    ]
+)
 
+CHECKBOX_HINT = "(Space: toggle, a: all, i: invert, Enter: confirm)"
 
-def _prompt_bool(prompt: str, default: bool = False) -> bool:
-    """Prompt for a yes/no boolean value."""
-    hint = "Y/n" if default else "y/N"
-    while True:
-        raw = input(f"{prompt} [{hint}]: ").strip().lower()
-        if not raw:
-            return default
-        if raw in ("y", "yes", "s", "sim"):
-            return True
-        if raw in ("n", "no", "nao"):
-            return False
-        print("  Invalid choice. Please enter 'y' or 'n'.")
+PLATFORM_LABELS: dict[str, str] = {
+    "BR1": "BR1  - Brazil (americas)",
+    "KR": "KR   - Korea (asia)",
+    "NA1": "NA1  - North America (americas)",
+    "EUW1": "EUW1 - Europe West (europe)",
+    "EUN1": "EUN1 - Europe Nordic & East (europe)",
+    "LA1": "LA1  - Latin America North (americas)",
+    "LA2": "LA2  - Latin America South (americas)",
+    "OC1": "OC1  - Oceania (americas)",
+    "JP1": "JP1  - Japan (asia)",
+    "TR1": "TR1  - Turkey (europe)",
+    "RU": "RU   - Russia (europe)",
+    "ME1": "ME1  - Middle East (europe)",
+    "SG2": "SG2  - Singapore (sea)",
+    "TW2": "TW2  - Taiwan (sea)",
+    "VN2": "VN2  - Vietnam (sea)",
+    "PH2": "PH2  - Philippines (sea)",
+    "TH2": "TH2  - Thailand (sea)",
+}
 
+POSITION_LABELS: dict[str, str] = {
+    "TOP": "TOP     - Top Lane",
+    "JUNGLE": "JUNGLE  - Jungle",
+    "MIDDLE": "MIDDLE  - Mid Lane",
+    "BOTTOM": "BOTTOM  - Bot Lane (ADC)",
+    "UTILITY": "UTILITY - Support",
+}
 
-def _prompt_choice(prompt: str, valid_options: set[str], default: str) -> str:
-    """Prompt for a menu choice from a set of valid option keys."""
-    while True:
-        raw = input(f"{prompt} [{default}]: ").strip()
-        choice = raw or default
-        if choice in valid_options:
-            return choice
-        print(f"  Invalid selection '{choice}'. Valid options: {', '.join(sorted(valid_options))}")
-
-
-def _prompt_int(
-    prompt: str,
-    default: Optional[int] = None,
-    min_val: Optional[int] = None,
-    max_val: Optional[int] = None,
-    allow_none: bool = False,
-) -> Optional[int]:
-    """Prompt for an integer with optional bounds and empty/none handling."""
-    default_label = str(default) if default is not None else ("Unlimited" if allow_none else "")
-    suffix = f" [{default_label}]" if default_label else ""
-    while True:
-        raw = input(f"{prompt}{suffix}: ").strip()
-        if not raw:
-            return default
-        if allow_none and raw.lower() in ("none", "unlimited", "all", "0"):
-            return None
-        try:
-            val = int(raw)
-        except ValueError:
-            print("  Invalid integer. Please try again.")
-            continue
-        if min_val is not None and val < min_val:
-            print(f"  Value must be >= {min_val}.")
-            continue
-        if max_val is not None and val > max_val:
-            print(f"  Value must be <= {max_val}.")
-            continue
-        return val
+EXTRA_FILTER_CHOICES: list[tuple[str, str]] = [
+    ("exclude_surrenders", "Exclude matches that ended in surrender"),
+    ("strict_seeds", "Strict Seed Tiers Only (disable snowball participant discovery)"),
+    ("time_window", "Time window filter (collect matches from last N days)"),
+    ("patch_filter", "Patch version prefix filter (e.g. 14.4)"),
+    ("champion_filter", "Champion filter (specific champion names)"),
+    ("duration_bounds", "Custom match duration bounds (min/max seconds)"),
+]
 
 
-def _prompt_float(
-    prompt: str,
-    default: Optional[float] = None,
-    min_val: Optional[float] = None,
-    allow_none: bool = False,
-) -> Optional[float]:
-    """Prompt for a float with optional lower bound and empty/none handling."""
-    default_label = str(default) if default is not None else ("None" if allow_none else "")
-    suffix = f" [{default_label}]" if default_label else ""
-    while True:
-        raw = input(f"{prompt}{suffix}: ").strip()
-        if not raw:
-            return default
-        if allow_none and raw.lower() in ("none", "unlimited", "all", "0"):
-            return None
-        try:
-            val = float(raw)
-        except ValueError:
-            print("  Invalid number. Please try again.")
-            continue
-        if min_val is not None and val <= min_val:
-            print(f"  Value must be > {min_val}.")
-            continue
-        return val
+def _require_non_empty(selected: list[Any]) -> bool | str:
+    """Validate that at least one checkbox option is selected."""
+    return True if selected else "Select at least one option (use Space to toggle)."
 
 
-def _parse_indexed_or_named(raw: str, allowed: tuple[str, ...]) -> list[str]:
-    """Parse comma-separated names or 1-based numeric indices against an allowed tuple."""
-    tokens = [t.strip() for t in raw.split(",") if t.strip()]
-    resolved: list[str] = []
-    for token in tokens:
-        if token.isdigit():
-            idx = int(token) - 1
-            if 0 <= idx < len(allowed):
-                resolved.append(allowed[idx])
-                continue
-        resolved.append(token.upper())
-    return resolved
+def _validate_positive_float_or_unlimited(raw: str) -> bool | str:
+    """Validate positive float or unlimited/zero input."""
+    cleaned = raw.strip().lower()
+    if not cleaned or cleaned in ("0", "none", "unlimited", "all"):
+        return True
+    try:
+        val = float(cleaned)
+    except ValueError:
+        return "Enter a valid number (e.g. 8.0) or 0 for unlimited."
+    return True if val > 0 else "Value must be greater than 0 (or 0 for unlimited)."
 
 
-def _select_platforms() -> list[str]:
-    """Interactive prompt for platform/region selection."""
-    print("\n--- Step 1: Select Server Regions / Platforms ---")
-    print("  [1] BR1  (Brazil - Americas)")
-    print("  [2] KR   (Korea - Asia)")
-    print("  [3] NA1  (North America - Americas)")
-    print("  [4] EUW1 (Europe West - Europe)")
-    print("  [5] Custom / Multi-Region Selection")
-
-    choice = _prompt_choice("Select region preset", {"1", "2", "3", "4", "5"}, "1")
-    preset_map = {"1": ["BR1"], "2": ["KR"], "3": ["NA1"], "4": ["EUW1"]}
-    if choice in preset_map:
-        return preset_map[choice]
-
-    print("\nAvailable Platforms by Regional Cluster:")
-    by_region: dict[str, list[str]] = {}
-    for plat, reg in PLATFORM_TO_REGION_MAP.items():
-        by_region.setdefault(reg, []).append(plat)
-    for reg, plats in by_region.items():
-        print(f"  {reg:<9}: {', '.join(plats)}")
-
-    while True:
-        raw = _prompt_text("Enter comma-separated platform codes (e.g. BR1,KR,NA1)", "BR1")
-        selected = [p.strip().upper() for p in raw.split(",") if p.strip()]
-        invalid = [p for p in selected if p not in PLATFORM_TO_REGION_MAP]
-        if selected and not invalid:
-            return selected
-        print(f"  Invalid platform(s): {invalid or 'empty'}. Please try again.")
+def _validate_optional_int(raw: str, min_val: int = 0, allow_unlimited: bool = True) -> bool | str:
+    """Validate integer within lower bound or optional unlimited keyword."""
+    cleaned = raw.strip().lower()
+    if allow_unlimited and (not cleaned or cleaned in ("none", "unlimited", "all", "0")):
+        return True
+    try:
+        val = int(cleaned)
+    except ValueError:
+        return "Enter a valid integer."
+    return True if val >= min_val else f"Value must be >= {min_val}."
 
 
-def _select_tiers_and_divisions() -> tuple[list[str], list[str], int]:
-    """Interactive prompt for ranked tiers (elos), divisions, and pages."""
-    print("\n--- Step 2: Select Ranked Tiers (Elos) ---")
-    print("  [1] Apex Tiers (Challenger, Grandmaster, Master)")
-    print("  [2] Challenger Only")
-    print("  [3] Challenger + Grandmaster")
-    print("  [4] Diamond+ (Challenger, Grandmaster, Master, Diamond)")
-    print("  [5] Custom Tier Selection (Challenger down to Iron)")
+def _validate_int_range(raw: str, min_val: int, max_val: int) -> bool | str:
+    """Validate integer strictly inside [min_val, max_val]."""
+    try:
+        val = int(raw.strip())
+    except ValueError:
+        return "Enter a valid integer."
+    if min_val <= val <= max_val:
+        return True
+    return f"Enter an integer between {min_val} and {max_val}."
 
-    choice = _prompt_choice("Select tier preset", {"1", "2", "3", "4", "5"}, "1")
-    if choice == "1":
-        tiers = ["CHALLENGER", "GRANDMASTER", "MASTER"]
-    elif choice == "2":
-        tiers = ["CHALLENGER"]
-    elif choice == "3":
-        tiers = ["CHALLENGER", "GRANDMASTER"]
-    elif choice == "4":
-        tiers = ["CHALLENGER", "GRANDMASTER", "MASTER", "DIAMOND"]
-    else:
-        print("\nAvailable Tiers:")
-        for idx, tier in enumerate(ALL_TIERS, start=1):
-            print(f"  [{idx:>2}] {tier}")
-        while True:
-            raw = _prompt_text("Enter tier names or numbers (comma-separated)", "1,2,3")
-            selected = _parse_indexed_or_named(raw, ALL_TIERS)
-            invalid = [t for t in selected if t not in ALL_TIERS]
-            if selected and not invalid:
-                tiers = selected
-                break
-            print(f"  Invalid tier(s): {invalid or 'empty'}. Please try again.")
+
+def _validate_dataset_name(raw: str) -> bool | str:
+    """Validate output dataset filename without path traversal characters."""
+    cleaned = raw.strip()
+    if not cleaned:
+        return "Filename prefix cannot be empty."
+    if "/" in cleaned or "\\" in cleaned or ".." in cleaned:
+        return "Filename must not contain path separators or '..'."
+    return True
+
+
+def render_banner() -> None:
+    """Render styled terminal header and keyboard navigation hints."""
+    banner_text = (
+        "[bold cyan]League of Legends Dataset Collector & Filter CLI[/bold cyan]\n"
+        r"[dim]Navigation: \[Up/Down] Move   \[Space] Toggle Checkbox   "
+        r"\[a] Select All   \[i] Invert   \[Enter] Confirm[/dim]"
+    )
+    console.print(Panel(banner_text, box=box.ROUNDED, border_style="cyan", padding=(0, 2)))
+
+
+def _ordered_platforms() -> list[str]:
+    """Return platforms with most common servers listed first, followed by remaining servers."""
+    priority = ["BR1", "KR", "NA1", "EUW1"]
+    rest = [p for p in PLATFORM_TO_REGION_MAP if p not in priority]
+    return priority + rest
+
+
+def _select_platforms() -> Optional[list[str]]:
+    """Multi-select checkbox prompt for server platforms."""
+    choices = [
+        Choice(
+            title=PLATFORM_LABELS.get(plat, f"{plat} ({PLATFORM_TO_REGION_MAP[plat]})"),
+            value=plat,
+            checked=(plat == "BR1"),
+        )
+        for plat in _ordered_platforms()
+    ]
+    return questionary.checkbox(
+        "1. Select Server Regions / Platforms:",
+        choices=choices,
+        validate=_require_non_empty,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+
+
+def _select_tiers_and_divisions() -> Optional[tuple[list[str], list[str], int]]:
+    """Multi-select checkbox prompt for ranked tiers and optional divisions/pages."""
+    tier_choices = [
+        Choice(
+            title=f"{tier:<12} ({'Apex' if tier in APEX_TIERS else 'Standard'})",
+            value=tier,
+            checked=(tier in APEX_TIERS),
+        )
+        for tier in ALL_TIERS
+    ]
+    tiers = questionary.checkbox(
+        "2. Select Ranked Tiers (Elos):",
+        choices=tier_choices,
+        validate=_require_non_empty,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+    if tiers is None:
+        return None
 
     divisions = ["I"]
     max_pages = 1
-    if any(t not in ("CHALLENGER", "GRANDMASTER", "MASTER") for t in tiers):
-        print("\nStandard tiers selected (Diamond or below). Configure divisions:")
-        while True:
-            raw_div = _prompt_text("Divisions (comma-separated from I, II, III, IV)", "I")
-            parsed_divs = [d.strip().upper() for d in raw_div.split(",") if d.strip()]
-            invalid_divs = [d for d in parsed_divs if d not in ALL_DIVISIONS]
-            if parsed_divs and not invalid_divs:
-                divisions = parsed_divs
-                break
-            print(f"  Invalid division(s): {invalid_divs or 'empty'}.")
-        max_pages = _prompt_int(
-            "Max API pages per division (205 players/page)",
-            default=1,
-            min_val=1,
-            max_val=20,
-        ) or 1
+    if any(t in STANDARD_TIERS for t in tiers):
+        div_choices = [
+            Choice(title=f"Division {div}", value=div, checked=(div == "I"))
+            for div in ALL_DIVISIONS
+        ]
+        selected_divs = questionary.checkbox(
+            "   Select Divisions for Standard Tiers (Diamond - Iron):",
+            choices=div_choices,
+            validate=_require_non_empty,
+            instruction=CHECKBOX_HINT,
+            style=CLI_STYLE,
+        ).ask()
+        if selected_divs is None:
+            return None
+        divisions = selected_divs
+
+        pages_raw = questionary.text(
+            "   Max API pages per division (205 players/page, 1-20):",
+            default="1",
+            validate=lambda r: _validate_int_range(r, 1, 20),
+            style=CLI_STYLE,
+        ).ask()
+        if pages_raw is None:
+            return None
+        max_pages = int(pages_raw.strip())
 
     return tiers, divisions, max_pages
 
 
-def _select_queue_and_match_type() -> tuple[Optional[int], Optional[str]]:
-    """Interactive prompt for queue ID and match type."""
-    print("\n--- Step 3: Select Queue & Match Type ---")
-    print("  [1] Ranked Solo/Duo (Queue 420, type: ranked)")
-    print("  [2] Ranked Flex     (Queue 440, type: ranked)")
-    print("  [3] Normal Draft    (Queue 400, type: normal)")
-    print("  [4] ARAM            (Queue 450, type: normal)")
-    print("  [5] All Queues      (No queue filter)")
+def _select_queue_and_match_type() -> Optional[tuple[Optional[int], Optional[str]]]:
+    """Single-select prompt for Riot queue and match type."""
+    queue_choices = [
+        Choice(title="Ranked Solo/Duo (Queue 420 | type: ranked)", value="420"),
+        Choice(title="Ranked Flex     (Queue 440 | type: ranked)", value="440"),
+        Choice(title="Normal Draft    (Queue 400 | type: normal)", value="400"),
+        Choice(title="ARAM            (Queue 450 | type: normal)", value="450"),
+        Choice(title="All Queues      (No queue filter)", value="ALL"),
+    ]
+    selected = questionary.select(
+        "3. Select Queue & Match Type:",
+        choices=queue_choices,
+        default="420",
+        style=CLI_STYLE,
+    ).ask()
+    if selected is None:
+        return None
 
-    choice = _prompt_choice("Select queue", {"1", "2", "3", "4", "5"}, "1")
     mapping: dict[str, tuple[Optional[int], Optional[str]]] = {
-        "1": (420, "ranked"),
-        "2": (440, "ranked"),
-        "3": (400, "normal"),
-        "4": (450, "normal"),
-        "5": (None, None),
+        "420": (420, "ranked"),
+        "440": (440, "ranked"),
+        "400": (400, "normal"),
+        "450": (450, "normal"),
+        "ALL": (None, None),
     }
-    return mapping[choice]
+    return mapping[selected]
 
 
-def _select_match_filters() -> dict:
-    """Interactive prompt for temporal, duration, champion, role, side, and discovery filters."""
-    print("\n--- Step 4: Match & Gameplay Filters ---")
+def _select_positions_and_side() -> Optional[tuple[list[str], Optional[str]]]:
+    """Multi-select checkboxes for participant roles and map sides."""
+    pos_choices = [
+        Choice(title=POSITION_LABELS[pos], value=pos, checked=True)
+        for pos in VALID_POSITIONS
+    ]
+    selected_pos = questionary.checkbox(
+        "4. Select Participant Roles / Positions to Keep:",
+        choices=pos_choices,
+        validate=_require_non_empty,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+    if selected_pos is None:
+        return None
+    positions = [] if len(selected_pos) == len(VALID_POSITIONS) else selected_pos
 
-    days_back = _prompt_float(
-        "Collect matches from last N days (Enter or 0 for all available)",
-        default=None,
-        min_val=0.0,
-        allow_none=True,
-    )
-    start_time = int(time.time() - (days_back * 86400)) if days_back else None
+    side_choices = [
+        Choice(title="BLUE Side (Team 100)", value="BLUE", checked=True),
+        Choice(title="RED  Side (Team 200)", value="RED", checked=True),
+    ]
+    selected_sides = questionary.checkbox(
+        "5. Select Map Sides to Keep:",
+        choices=side_choices,
+        validate=_require_non_empty,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+    if selected_sides is None:
+        return None
+    side = None if len(selected_sides) == 2 else selected_sides[0]
 
-    patch_raw = _prompt_text("Patch version prefix filter (e.g. 14.4 or Enter for all)", "")
-    patch_prefix = patch_raw or None
+    return positions, side
 
-    min_duration_sec = _prompt_int(
-        "Minimum match duration in seconds (excludes remakes)",
-        default=300,
-        min_val=0,
-    )
-    min_dur = min_duration_sec if min_duration_sec is not None else 300
 
-    max_duration_sec = _prompt_int(
-        "Maximum match duration in seconds",
-        default=None,
-        min_val=min_dur,
-        allow_none=True,
-    )
-    exclude_surrenders = _prompt_bool("Exclude matches that ended in surrender?", default=False)
+def _select_extra_filters() -> Optional[dict[str, Any]]:
+    """Multi-select checkbox menu for optional match and gameplay filters."""
+    extra_choices = [
+        Choice(title=label, value=key, checked=False)
+        for key, label in EXTRA_FILTER_CHOICES
+    ]
+    enabled = questionary.checkbox(
+        "6. Toggle Additional Match & Gameplay Filters (Optional):",
+        choices=extra_choices,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+    if enabled is None:
+        return None
 
-    champ_raw = _prompt_text(
-        "Filter matches by champion names (comma-separated, e.g. Ahri,LeeSin or Enter for all)",
-        "",
-    )
-    champions = [c.strip() for c in champ_raw.split(",") if c.strip()] if champ_raw else []
+    enabled_set = set(enabled)
+    start_time: Optional[int] = None
+    patch_prefix: Optional[str] = None
+    champions: list[str] = []
+    min_duration_sec = 300
+    max_duration_sec: Optional[int] = None
 
-    print("  Positions: [1] TOP  [2] JUNGLE  [3] MIDDLE  [4] BOTTOM  [5] UTILITY")
-    while True:
-        pos_raw = _prompt_text(
-            "Filter participant roles (names or numbers comma-separated, Enter for all)",
-            "",
-        )
-        if not pos_raw:
-            positions = []
-            break
-        parsed_pos = _parse_indexed_or_named(pos_raw, VALID_POSITIONS)
-        invalid_pos = [p for p in parsed_pos if p not in VALID_POSITIONS]
-        if not invalid_pos:
-            positions = parsed_pos
-            break
-        print(f"  Invalid position(s): {invalid_pos}.")
+    if "time_window" in enabled_set:
+        days_raw = questionary.text(
+            "   Collect matches from the last N days:",
+            default="7",
+            validate=_validate_positive_float_or_unlimited,
+            style=CLI_STYLE,
+        ).ask()
+        if days_raw is None:
+            return None
+        cleaned = days_raw.strip().lower()
+        if cleaned and cleaned not in ("0", "none", "unlimited", "all"):
+            start_time = int(time.time() - (float(cleaned) * 86400))
 
-    while True:
-        side_raw = _prompt_text("Filter map side (BLUE, RED, or Enter for both)", "").upper()
-        if not side_raw:
-            side = None
-            break
-        if side_raw in ("BLUE", "RED"):
-            side = side_raw
-            break
-        print("  Invalid side. Enter BLUE, RED, or press Enter for both.")
+    if "patch_filter" in enabled_set:
+        patch_raw = questionary.text(
+            "   Patch version prefix (e.g. 14.4):",
+            default="",
+            style=CLI_STYLE,
+        ).ask()
+        if patch_raw is None:
+            return None
+        patch_prefix = patch_raw.strip() or None
 
-    print("\nPlayer Discovery Mode:")
-    print("  [1] Snowball Graph (Discover and crawl match participants for diversity)")
-    print("  [2] Strict Seed Tiers Only (Query only players from selected ranked tiers)")
-    disc_choice = _prompt_choice("Select discovery mode", {"1", "2"}, "1")
-    discover_participants = disc_choice == "1"
+    if "champion_filter" in enabled_set:
+        champ_raw = questionary.text(
+            "   Champion names (comma-separated, e.g. Ahri, LeeSin):",
+            default="",
+            style=CLI_STYLE,
+        ).ask()
+        if champ_raw is None:
+            return None
+        champions = [c.strip() for c in champ_raw.split(",") if c.strip()]
+
+    if "duration_bounds" in enabled_set:
+        min_raw = questionary.text(
+            "   Minimum match duration in seconds (excludes remakes):",
+            default="300",
+            validate=lambda r: _validate_optional_int(r, min_val=0, allow_unlimited=False),
+            style=CLI_STYLE,
+        ).ask()
+        if min_raw is None:
+            return None
+        min_duration_sec = int(min_raw.strip())
+
+        max_raw = questionary.text(
+            "   Maximum match duration in seconds (0 or Enter for unlimited):",
+            default="Unlimited",
+            validate=lambda r: _validate_optional_int(r, min_val=min_duration_sec, allow_unlimited=True),
+            style=CLI_STYLE,
+        ).ask()
+        if max_raw is None:
+            return None
+        cleaned_max = max_raw.strip().lower()
+        if cleaned_max not in ("", "0", "none", "unlimited", "all"):
+            max_duration_sec = int(cleaned_max)
 
     return {
+        "exclude_surrenders": "exclude_surrenders" in enabled_set,
+        "discover_participants": "strict_seeds" not in enabled_set,
         "start_time": start_time,
         "patch_prefix": patch_prefix,
-        "min_duration_sec": min_dur,
-        "max_duration_sec": max_duration_sec,
-        "exclude_surrenders": exclude_surrenders,
         "champions": champions,
-        "positions": positions,
-        "side": side,
-        "discover_participants": discover_participants,
+        "min_duration_sec": min_duration_sec,
+        "max_duration_sec": max_duration_sec,
     }
 
 
-def _select_execution_and_output() -> dict:
-    """Interactive prompt for duration, match count limits, and output settings."""
-    print("\n--- Step 5: Execution Limits & Storage ---")
-    max_hours = _prompt_float(
-        "Maximum execution duration in hours (0 for unlimited)",
-        default=8.0,
-        min_val=0.0,
-        allow_none=True,
+def _select_execution_and_output() -> Optional[dict[str, Any]]:
+    """Configure storage formats (checkboxes), execution time/match limits, and checkpoint options."""
+    format_choices = [
+        Choice(title="Parquet (.parquet - Snappy compressed, typed for ML)", value="parquet", checked=True),
+        Choice(title="CSV     (.csv     - Spreadsheet-compatible UTF-8)", value="csv", checked=True),
+    ]
+    selected_formats = questionary.checkbox(
+        "7. Select Output Storage Format(s):",
+        choices=format_choices,
+        validate=_require_non_empty,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+    if selected_formats is None:
+        return None
+    if set(selected_formats) == {"parquet", "csv"}:
+        output_format = "both"
+    else:
+        output_format = selected_formats[0]
+
+    hours_raw = questionary.text(
+        "8. Maximum execution duration in hours (0 for unlimited):",
+        default="8.0",
+        validate=_validate_positive_float_or_unlimited,
+        style=CLI_STYLE,
+    ).ask()
+    if hours_raw is None:
+        return None
+    cleaned_hours = hours_raw.strip().lower()
+    max_hours = None if cleaned_hours in ("", "0", "none", "unlimited", "all") else float(cleaned_hours)
+
+    target_raw = questionary.text(
+        "   Target number of unique matches (Enter or Unlimited for time-based):",
+        default="Unlimited",
+        validate=lambda r: _validate_optional_int(r, min_val=1, allow_unlimited=True),
+        style=CLI_STYLE,
+    ).ask()
+    if target_raw is None:
+        return None
+    cleaned_target = target_raw.strip().lower()
+    target_matches = (
+        None if cleaned_target in ("", "0", "none", "unlimited", "all") else int(cleaned_target)
     )
-    target_matches = _prompt_int(
-        "Target number of unique matches to collect",
-        default=None,
-        min_val=1,
-        allow_none=True,
-    )
-    max_per_player = _prompt_int(
-        "Max matches to query per player (1-100)",
-        default=10,
-        min_val=1,
-        max_val=100,
-    ) or 10
 
-    while True:
-        fmt = _prompt_text("Output format (both, parquet, csv)", "both").lower()
-        if fmt in ("both", "parquet", "csv"):
-            break
-        print("  Invalid format. Choose 'both', 'parquet', or 'csv'.")
+    per_player_raw = questionary.text(
+        "   Max matches to query per player (1-100):",
+        default="10",
+        validate=lambda r: _validate_int_range(r, 1, 100),
+        style=CLI_STYLE,
+    ).ask()
+    if per_player_raw is None:
+        return None
+    max_per_player = int(per_player_raw.strip())
 
-    while True:
-        dataset_name = _prompt_text("Output dataset filename prefix", "ranked_matches")
-        if dataset_name and "/" not in dataset_name and "\\" not in dataset_name and ".." not in dataset_name:
-            break
-        print("  Invalid filename. Avoid path separators.")
+    dataset_name = questionary.text(
+        "   Output dataset filename prefix (inside data/):",
+        default="ranked_matches",
+        validate=_validate_dataset_name,
+        style=CLI_STYLE,
+    ).ask()
+    if dataset_name is None:
+        return None
 
-    reset_state = _prompt_bool("Reset previous checkpoint state and start fresh?", default=False)
+    reset_state = questionary.confirm(
+        "   Reset previous checkpoint state and start fresh?",
+        default=False,
+        style=CLI_STYLE,
+    ).ask()
+    if reset_state is None:
+        return None
 
     return {
+        "output_format": output_format,
         "max_duration_hours": max_hours,
         "target_matches": target_matches,
         "max_matches_per_player": max_per_player,
-        "output_format": fmt,
-        "dataset_name": dataset_name,
+        "dataset_name": dataset_name.strip(),
         "reset_state": reset_state,
     }
 
 
 def display_pre_flight_summary(config: CollectionFilterConfig) -> None:
-    """Print formatted summary of all configured filters before executing API requests."""
+    """Render a styled Rich summary table of all selected filters before sending API requests."""
     queue_name = QUEUE_MAP.get(config.queue_id, str(config.queue_id)) if config.queue_id else "All Queues"
-    duration_range = f"{config.min_duration_sec}s"
-    if config.max_duration_sec is not None:
-        duration_range += f" .. {config.max_duration_sec}s"
-    else:
-        duration_range += " .. unlimited"
-
-    print("\n" + "=" * 68)
-    print("PRE-FLIGHT COLLECTION CONFIGURATION SUMMARY")
-    print("=" * 68)
-    print(f"Platforms:            {', '.join(config.platforms)}")
-    print(f"Ranked Tiers:         {', '.join(config.tiers)}")
-    if config.has_standard_tiers:
-        print(
-            f"Divisions / Pages:    {', '.join(config.divisions)} "
-            f"(max {config.max_pages_per_division} page(s)/division)"
-        )
-    print(f"Queue / Match Type:   {config.queue_id or 'All'} ({queue_name}) | {config.match_type or 'All'}")
-    print(f"Match Duration Range: {duration_range}")
-    print(f"Exclude Surrenders:   {'Yes' if config.exclude_surrenders else 'No'}")
-    print(f"Patch Prefix:         {config.patch_prefix or 'All patches'}")
-    print(f"Champions Filter:     {', '.join(config.champions) if config.champions else 'All champions'}")
-    print(f"Positions Filter:     {', '.join(config.positions) if config.positions else 'All positions'}")
-    print(f"Map Side Filter:      {config.side or 'Both (BLUE & RED)'}")
-    print(
-        f"Participant Mode:     "
-        f"{'Snowball Graph Discovery' if config.discover_participants else 'Strict Seed Tiers Only'}"
+    duration_range = f"{config.min_duration_sec}s .. " + (
+        f"{config.max_duration_sec}s" if config.max_duration_sec is not None else "unlimited"
     )
-    print(
-        f"Time / Match Limits:  "
+    time_window = (
+        f"Since epoch {config.start_time}" if config.start_time is not None else "All available"
+    )
+
+    table = Table(
+        title="Pre-Flight Collection Configuration",
+        box=box.ROUNDED,
+        border_style="cyan",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Filter / Parameter", style="bold white", no_wrap=True)
+    table.add_column("Selected Value", style="green")
+
+    table.add_row("Platforms", ", ".join(config.platforms))
+    table.add_row("Ranked Tiers (Elos)", ", ".join(config.tiers))
+    if config.has_standard_tiers:
+        table.add_row(
+            "Divisions / Pages",
+            f"{', '.join(config.divisions)} (max {config.max_pages_per_division} page(s)/division)",
+        )
+    table.add_row("Queue / Match Type", f"{config.queue_id or 'All'} ({queue_name}) | {config.match_type or 'All'}")
+    table.add_row("Roles / Positions", ", ".join(config.positions) if config.positions else "All (TOP..UTILITY)")
+    table.add_row("Map Side", config.side or "Both (BLUE & RED)")
+    table.add_row("Time Window", time_window)
+    table.add_row("Match Duration", duration_range)
+    table.add_row("Exclude Surrenders", "Yes" if config.exclude_surrenders else "No")
+    table.add_row("Patch Prefix", config.patch_prefix or "All patches")
+    table.add_row("Champions", ", ".join(config.champions) if config.champions else "All champions")
+    table.add_row(
+        "Discovery Mode",
+        "Snowball Graph Discovery" if config.discover_participants else "Strict Seed Tiers Only",
+    )
+    table.add_row(
+        "Execution Limits",
         f"{f'{config.max_duration_hours}h' if config.max_duration_hours else 'Unlimited time'} | "
         f"{config.target_matches or 'Unlimited'} matches | "
-        f"{config.max_matches_per_player} matches/player"
+        f"{config.max_matches_per_player} matches/player",
     )
-    print(f"Storage Output:       data/{config.dataset_name}.* (Format: {config.output_format})")
-    print(f"Reset Checkpoint:     {'Yes' if config.reset_state else 'No (Resume if exists)'}")
-    print("-" * 68)
-    print("Equivalent CLI Command:")
-    print(f"  {config.to_cli_command()}")
-    print("=" * 68)
+    table.add_row("Storage Output", f"data/{config.dataset_name}.* (Format: {config.output_format})")
+    table.add_row("Reset Checkpoint", "Yes" if config.reset_state else "No (Resume if exists)")
+
+    console.print()
+    console.print(table)
+    console.print(
+        Panel(
+            config.to_cli_command(),
+            title="Equivalent Reproducible CLI Command",
+            box=box.ROUNDED,
+            border_style="dim",
+        )
+    )
 
 
 def confirm_collection_start(config: CollectionFilterConfig) -> bool:
-    """Display pre-flight summary and ask user confirmation before starting requests."""
+    """Display pre-flight summary and confirm before initiating Riot API requests."""
     display_pre_flight_summary(config)
-    try:
-        return _prompt_bool("Start match collection now?", default=True)
-    except (KeyboardInterrupt, EOFError):
-        print("\nCollection cancelled.")
-        return False
+    confirmed = questionary.confirm(
+        "Start match collection now?",
+        default=True,
+        style=CLI_STYLE,
+    ).ask()
+    return bool(confirmed)
 
 
 def prompt_collection_filters() -> Optional[CollectionFilterConfig]:
-    """Run interactive wizard to build and confirm CollectionFilterConfig before API requests."""
+    """Run checkbox-driven interactive wizard to configure all filters before API calls."""
+    render_banner()
+
+    platforms = _select_platforms()
+    if platforms is None:
+        console.print("[yellow]Collection cancelled. No API requests were made.[/yellow]")
+        return None
+
+    tiers_result = _select_tiers_and_divisions()
+    if tiers_result is None:
+        console.print("[yellow]Collection cancelled. No API requests were made.[/yellow]")
+        return None
+    tiers, divisions, max_pages = tiers_result
+
+    queue_result = _select_queue_and_match_type()
+    if queue_result is None:
+        console.print("[yellow]Collection cancelled. No API requests were made.[/yellow]")
+        return None
+    queue_id, match_type = queue_result
+
+    pos_side_result = _select_positions_and_side()
+    if pos_side_result is None:
+        console.print("[yellow]Collection cancelled. No API requests were made.[/yellow]")
+        return None
+    positions, side = pos_side_result
+
+    extra_filters = _select_extra_filters()
+    if extra_filters is None:
+        console.print("[yellow]Collection cancelled. No API requests were made.[/yellow]")
+        return None
+
+    exec_settings = _select_execution_and_output()
+    if exec_settings is None:
+        console.print("[yellow]Collection cancelled. No API requests were made.[/yellow]")
+        return None
+
     try:
-        print("\n" + "=" * 68)
-        print("LEAGUE OF LEGENDS MATCH COLLECTION - INTERACTIVE FILTER WIZARD")
-        print("=" * 68)
-
-        platforms = _select_platforms()
-        tiers, divisions, max_pages = _select_tiers_and_divisions()
-        queue_id, match_type = _select_queue_and_match_type()
-        match_filters = _select_match_filters()
-        exec_settings = _select_execution_and_output()
-
         config = CollectionFilterConfig(
             platforms=platforms,
             tiers=tiers,
@@ -429,156 +571,275 @@ def prompt_collection_filters() -> Optional[CollectionFilterConfig]:
             max_pages_per_division=max_pages,
             queue_id=queue_id,
             match_type=match_type,
-            **match_filters,
+            positions=positions,
+            side=side,
+            **extra_filters,
             **exec_settings,
         )
-    except (KeyboardInterrupt, EOFError):
-        print("\nWizard cancelled by user. No API requests were made.")
-        return None
     except ValidationError as err:
-        print(f"\nConfiguration validation error: {err}")
+        console.print(f"[red]Configuration validation error:[/red] {err}")
         return None
 
     if not confirm_collection_start(config):
-        print("Collection cancelled. No API requests were made.")
+        console.print("[yellow]Collection cancelled. No API requests were made.[/yellow]")
         return None
 
     return config
 
 
 def prompt_dataset_filter(settings: Settings) -> Optional[DatasetFilterConfig]:
-    """Interactive prompt for filtering and exporting an existing dataset on disk."""
+    """Checkbox-driven offline dataset filtering wizard."""
+    console.print(
+        Panel(
+            "[bold cyan]Offline Dataset Filter & Export Wizard[/bold cyan]\n"
+            f"[dim]{CHECKBOX_HINT}[/dim]",
+            box=box.ROUNDED,
+            border_style="cyan",
+        )
+    )
+
+    default_input = str(settings.data_dir / "ranked_matches.parquet")
+    input_raw = questionary.text(
+        "Source dataset path:",
+        default=default_input,
+        style=CLI_STYLE,
+    ).ask()
+    if input_raw is None:
+        return None
+    input_path = Path(input_raw.strip())
+    if not input_path.exists():
+        console.print(f"[red]File not found:[/red] {input_path}")
+        return None
+
+    selected_pos = questionary.checkbox(
+        "Select Positions to Keep:",
+        choices=[Choice(title=POSITION_LABELS[p], value=p, checked=True) for p in VALID_POSITIONS],
+        validate=_require_non_empty,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+    if selected_pos is None:
+        return None
+    positions = [] if len(selected_pos) == len(VALID_POSITIONS) else selected_pos
+
+    selected_sides = questionary.checkbox(
+        "Select Map Sides to Keep:",
+        choices=[
+            Choice(title="BLUE Side", value="BLUE", checked=True),
+            Choice(title="RED  Side", value="RED", checked=True),
+        ],
+        validate=_require_non_empty,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+    if selected_sides is None:
+        return None
+    side = None if len(selected_sides) == 2 else selected_sides[0]
+
+    selected_outcomes = questionary.checkbox(
+        "Select Match Outcomes to Keep:",
+        choices=[
+            Choice(title="Win  (1)", value=1, checked=True),
+            Choice(title="Loss (0)", value=0, checked=True),
+        ],
+        validate=_require_non_empty,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+    if selected_outcomes is None:
+        return None
+    win = None if len(selected_outcomes) == 2 else int(selected_outcomes[0])
+
+    champ_raw = questionary.text(
+        "Champion names filter (comma-separated, leave blank for all):",
+        default="",
+        style=CLI_STYLE,
+    ).ask()
+    if champ_raw is None:
+        return None
+    champions = [c.strip() for c in champ_raw.split(",") if c.strip()]
+
+    patch_raw = questionary.text(
+        "Patch prefix filter (e.g. 14.4, leave blank for all):",
+        default="",
+        style=CLI_STYLE,
+    ).ask()
+    if patch_raw is None:
+        return None
+
+    min_raw = questionary.text(
+        "Minimum match duration in seconds (leave blank for no minimum):",
+        default="",
+        validate=lambda r: _validate_optional_int(r, min_val=0, allow_unlimited=True) if r.strip() else True,
+        style=CLI_STYLE,
+    ).ask()
+    if min_raw is None:
+        return None
+    min_dur = int(min_raw.strip()) if min_raw.strip() else None
+
+    max_raw = questionary.text(
+        "Maximum match duration in seconds (leave blank for no maximum):",
+        default="",
+        validate=lambda r: _validate_optional_int(r, min_val=0, allow_unlimited=True) if r.strip() else True,
+        style=CLI_STYLE,
+    ).ask()
+    if max_raw is None:
+        return None
+    max_dur = int(max_raw.strip()) if max_raw.strip() else None
+
+    selected_formats = questionary.checkbox(
+        "Select Export Format(s):",
+        choices=[
+            Choice(title="CSV     (.csv)", value="csv", checked=True),
+            Choice(title="Parquet (.parquet)", value="parquet", checked=False),
+        ],
+        validate=_require_non_empty,
+        instruction=CHECKBOX_HINT,
+        style=CLI_STYLE,
+    ).ask()
+    if selected_formats is None:
+        return None
+    fmt = "both" if set(selected_formats) == {"csv", "parquet"} else selected_formats[0]
+
+    default_out = str(
+        settings.data_dir / f"filtered_matches.{'parquet' if fmt == 'parquet' else 'csv'}"
+    )
+    out_raw = questionary.text(
+        "Destination file path:",
+        default=default_out,
+        style=CLI_STYLE,
+    ).ask()
+    if out_raw is None:
+        return None
+
     try:
-        print("\n--- Filter & Export Existing Dataset ---")
-        default_input = str(settings.data_dir / "ranked_matches.parquet")
-        input_path = Path(_prompt_text("Source dataset path", default_input))
-        if not input_path.exists():
-            print(f"  File not found: {input_path}")
-            return None
-
-        champ_raw = _prompt_text("Champion names (comma-separated, Enter for all)", "")
-        champions = [c.strip() for c in champ_raw.split(",") if c.strip()] if champ_raw else []
-
-        pos_raw = _prompt_text("Positions (TOP,JUNGLE,MIDDLE,BOTTOM,UTILITY or Enter for all)", "")
-        positions = [p.strip().upper() for p in pos_raw.split(",") if p.strip()] if pos_raw else []
-
-        side_raw = _prompt_text("Map side (BLUE, RED, or Enter for both)", "").upper()
-        side = side_raw if side_raw in ("BLUE", "RED") else None
-
-        win = _prompt_int("Match outcome filter (1=Win, 0=Loss, Enter for all)", default=None, min_val=0, max_val=1)
-        patch_raw = _prompt_text("Patch version prefix (e.g. 14.4 or Enter for all)", "")
-        min_dur = _prompt_int("Min game duration in seconds (Enter for no min)", default=None, min_val=0)
-        max_dur = _prompt_int("Max game duration in seconds (Enter for no max)", default=None, min_val=0)
-
-        while True:
-            fmt = _prompt_text("Export format (csv, parquet, both)", "csv").lower()
-            if fmt in ("csv", "parquet", "both"):
-                break
-            print("  Invalid format.")
-
-        default_out = str(settings.data_dir / f"filtered_matches.{ 'parquet' if fmt == 'parquet' else 'csv' }")
-        output_path = Path(_prompt_text("Destination file path", default_out))
-
         return DatasetFilterConfig(
             input_path=input_path,
-            output_path=output_path,
+            output_path=Path(out_raw.strip()),
             output_format=fmt,  # type: ignore[arg-type]
             champions=champions,
             positions=positions,
             side=side,  # type: ignore[arg-type]
             win=win,
-            patch_prefix=patch_raw or None,
+            patch_prefix=patch_raw.strip() or None,
             min_duration_sec=min_dur,
             max_duration_sec=max_dur,
         )
-    except (KeyboardInterrupt, EOFError):
-        print("\nFilter cancelled.")
-        return None
     except ValidationError as err:
-        print(f"\nInvalid filter parameters: {err}")
+        console.print(f"[red]Invalid filter parameters:[/red] {err}")
         return None
 
 
 def print_dataset_status(settings: Settings, platform: Optional[str] = None) -> None:
-    """Display crawler checkpoint state and dataset file statistics."""
+    """Display crawler checkpoint state and dataset file statistics in a Rich table."""
     target_platform = (platform or settings.default_platform).lower()
     state_file = settings.data_dir / f"state_{target_platform}.json"
     parquet_file = settings.data_dir / "ranked_matches.parquet"
     csv_file = settings.data_dir / "ranked_matches.csv"
 
-    print("\n" + "=" * 54)
-    print("DATASET & CRAWLER STATUS SUMMARY")
-    print("=" * 54)
+    table = Table(
+        title="Dataset & Crawler Status Summary",
+        box=box.ROUNDED,
+        border_style="cyan",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Metric", style="bold white")
+    table.add_column("Value", style="green")
 
     if state_file.exists():
         sm = StateManager(state_file)
-        print(f"Platform:            {target_platform.upper()}")
-        print(f"Visited Players:     {len(sm.visited_puuids):,}")
-        print(f"Queued Players:      {len(sm.queued_puuids):,}")
-        print(f"Processed Matches:   {len(sm.processed_match_ids):,}")
-        print(f"Failed Matches:      {len(sm.failed_match_ids):,}")
+        table.add_row("Platform Checkpoint", target_platform.upper())
+        table.add_row("Visited Players", f"{len(sm.visited_puuids):,}")
+        table.add_row("Queued Players", f"{len(sm.queued_puuids):,}")
+        table.add_row("Processed Matches", f"{len(sm.processed_match_ids):,}")
+        table.add_row("Failed / Skipped Matches", f"{len(sm.failed_match_ids):,}")
     else:
-        print(f"Platform:            {target_platform.upper()} (No state file yet)")
+        table.add_row("Platform Checkpoint", f"{target_platform.upper()} (No state file yet)")
 
-    print("-" * 54)
     if parquet_file.exists():
         size_mb = parquet_file.stat().st_size / (1024 * 1024)
-        table = pq.read_table(parquet_file)
-        print(f"Parquet Dataset:     {parquet_file} ({size_mb:.2f} MB)")
-        print(f"Total Rows:          {table.num_rows:,} ({table.num_rows // 10:,} matches)")
+        pq_table = pq.read_table(parquet_file)
+        table.add_row("Parquet Dataset", f"{parquet_file} ({size_mb:.2f} MB)")
+        table.add_row(
+            "Total Records",
+            f"{pq_table.num_rows:,} rows ({pq_table.num_rows // 10:,} matches)",
+        )
     else:
-        print("Parquet Dataset:     Not created yet")
+        table.add_row("Parquet Dataset", "Not created yet")
 
     if csv_file.exists():
         size_mb = csv_file.stat().st_size / (1024 * 1024)
-        print(f"CSV Dataset:         {csv_file} ({size_mb:.2f} MB)")
-    print("=" * 54 + "\n")
+        table.add_row("CSV Dataset", f"{csv_file} ({size_mb:.2f} MB)")
+
+    console.print()
+    console.print(table)
+    console.print()
 
 
 def run_interactive_cli(settings: Optional[Settings] = None) -> None:
-    """Launch the interactive CLI main menu loop."""
+    """Launch the interactive Rich + Questionary main menu loop."""
     app_settings = settings or get_settings()
+    render_banner()
+
+    menu_choices = [
+        Choice(
+            title="Configure & Start Match Collection (Checkbox Filter Wizard)",
+            value="wizard",
+        ),
+        Choice(
+            title="Quick Start Collection (BR1 | Challenger, GM, Master | Solo/Duo | 8h)",
+            value="quick",
+        ),
+        Choice(
+            title="View Dataset & Crawler Status",
+            value="status",
+        ),
+        Choice(
+            title="Filter & Export Existing Dataset",
+            value="filter",
+        ),
+        Choice(
+            title="Reset Crawler Checkpoint State",
+            value="reset",
+        ),
+        Choice(
+            title="Exit",
+            value="exit",
+        ),
+    ]
 
     while True:
-        print("\n" + "=" * 60)
-        print("LEAGUE OF LEGENDS ML DATASET CLI")
-        print("=" * 60)
-        print("  [1] Configure & Start Match Collection (Interactive Filter Wizard)")
-        print("  [2] Quick Start Collection (BR1 | Challenger, GM, Master | Solo/Duo | 8h)")
-        print("  [3] View Dataset & Crawler Status")
-        print("  [4] Filter & Export Existing Dataset")
-        print("  [5] Reset Crawler Checkpoint State")
-        print("  [0] Exit")
-        print("=" * 60)
+        choice = questionary.select(
+            "Main Menu - Select an action:",
+            choices=menu_choices,
+            style=CLI_STYLE,
+        ).ask()
 
-        try:
-            choice = _prompt_choice("Select an option", {"0", "1", "2", "3", "4", "5"}, "1")
-        except (KeyboardInterrupt, EOFError):
-            print("\nExiting CLI.")
+        if choice is None or choice == "exit":
+            console.print("[cyan]Exiting CLI.[/cyan]")
             break
 
-        if choice == "0":
-            print("Goodbye.")
-            break
-
-        if choice == "1":
+        if choice == "wizard":
             config = prompt_collection_filters()
             if config is not None:
                 run_multi_platform_collection(app_settings, config)
 
-        elif choice == "2":
+        elif choice == "quick":
             quick_config = CollectionFilterConfig()
             if confirm_collection_start(quick_config):
                 run_multi_platform_collection(app_settings, quick_config)
 
-        elif choice == "3":
-            try:
-                plat = _prompt_text("Platform checkpoint to inspect", app_settings.default_platform)
-            except (KeyboardInterrupt, EOFError):
-                continue
-            print_dataset_status(app_settings, plat)
+        elif choice == "status":
+            plat = questionary.text(
+                "Platform checkpoint to inspect:",
+                default=app_settings.default_platform,
+                style=CLI_STYLE,
+            ).ask()
+            if plat is not None:
+                print_dataset_status(app_settings, plat)
 
-        elif choice == "4":
+        elif choice == "filter":
             filter_cfg = prompt_dataset_filter(app_settings)
             if filter_cfg is not None:
                 storage = BatchStorage(data_dir=app_settings.data_dir)
@@ -594,17 +855,29 @@ def run_interactive_cli(settings: Optional[Settings] = None) -> None:
                     min_duration_sec=filter_cfg.min_duration_sec,
                     max_duration_sec=filter_cfg.max_duration_sec,
                 )
-                print(f"\nExported {rows:,} filtered rows to: {', '.join(str(p) for p in paths)}")
+                console.print(
+                    f"\n[green]Exported {rows:,} filtered rows to:[/green] "
+                    f"{', '.join(str(p) for p in paths)}\n"
+                )
 
-        elif choice == "5":
-            try:
-                plat = _prompt_text("Platform state to reset", app_settings.default_platform).upper()
-                state_path = app_settings.data_dir / f"state_{plat.lower()}.json"
-                if not state_path.exists():
-                    print(f"No state file found for {plat} ({state_path}).")
-                    continue
-                if _prompt_bool(f"Delete checkpoint file {state_path}?", default=False):
-                    state_path.unlink()
-                    print(f"Reset state file: {state_path}")
-            except (KeyboardInterrupt, EOFError):
+        elif choice == "reset":
+            plat_raw = questionary.text(
+                "Platform state to reset:",
+                default=app_settings.default_platform,
+                style=CLI_STYLE,
+            ).ask()
+            if plat_raw is None:
                 continue
+            plat = plat_raw.strip().upper()
+            state_path = app_settings.data_dir / f"state_{plat.lower()}.json"
+            if not state_path.exists():
+                console.print(f"[yellow]No state file found for {plat} ({state_path}).[/yellow]")
+                continue
+            confirmed = questionary.confirm(
+                f"Delete checkpoint file {state_path}?",
+                default=False,
+                style=CLI_STYLE,
+            ).ask()
+            if confirmed:
+                state_path.unlink()
+                console.print(f"[green]Reset state file:[/green] {state_path}")

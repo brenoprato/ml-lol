@@ -11,7 +11,7 @@ Automated, resilient, and rate-limit compliant interactive CLI and data extracti
 The pipeline extracts granular match and participant statistics, normalizing the raw Riot API payload into a structured tabular dataset containing **108 features per participant** (up to 10 rows per match).
 
 ### Key Features
-- **Interactive CLI & Pre-Request Filter Wizard:** Configure regions, ranked tiers, divisions, queues, time windows, match durations, surrender exclusions, champions, roles, map side, and discovery modes interactively before dispatching any API requests.
+- **Checkbox-Driven Interactive CLI (`questionary` + `rich`):** Navigate with arrow keys and toggle one or multiple checkboxes (`Space` to toggle, `a` to select all, `Enter` to confirm) for regions, ranked tiers, divisions, roles, map sides, extra gameplay filters, and output formats before dispatching any API requests, accompanied by styled `rich` tables and panels.
 - **Full Ranked Tier & Multi-Region Coverage:** Harvests player seeds across Apex tiers (`CHALLENGER`, `GRANDMASTER`, `MASTER`) and Standard tiers (`DIAMOND` through `IRON`, divisions `I` to `IV`), supporting single or multi-platform runs (`BR1,KR,NA1,EUW1`, etc.).
 - **Rate Limit Compliance:** Sliding-window token bucket limiter enforcing both Riot short (20 req/1s) and long (100 req/120s) rate limits with a 10% safety margin, combined with reactive backoff for HTTP 429 (`Retry-After`).
 - **Player Diversity Modes:** Choose between breadth-first Snowball Graph discovery (enqueuing match participants) or strict seed-tier-only crawling (`--no-discover`).

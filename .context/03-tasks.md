@@ -140,7 +140,7 @@ This checklist outlines the atomic execution steps required to build, test, and 
   - **Verification:** Mocked `respx` and unit tests verifying standard tier pagination, query params, and match filtering.
 
 - [x] **Task 8.3: Interactive CLI Wizard & Offline Dataset Filter Subcommand**
-  - Implement `src/cli/interactive.py` with main menu loop, step-by-step pre-request filter wizard, pre-flight summary confirmation, status inspector, and offline dataset filter wizard.
+  - Implement `src/cli/interactive.py` using `questionary` (multi-select checkboxes for regions, tiers, divisions, roles, sides, extra filters, and output formats) and `rich` (styled tables and panels for banner, pre-flight summary, and dataset status).
   - Update `src/main.py` (`interactive`, `collect`, `filter`, `export`, `status`) and `BatchStorage.filter_and_export`.
   - Support multi-platform execution via `run_multi_platform_collection` in `src/pipeline/orchestrator.py`.
-  - **Verification:** `pytest -v` (27 passed), CLI `--help` checks, and interactive smoke test.
+  - **Verification:** `pytest -v` (28 passed), CLI `--help` checks, and Rich output previews.
